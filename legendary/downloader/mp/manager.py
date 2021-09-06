@@ -721,6 +721,9 @@ class DLManager(Process):
                 hours = minutes = seconds = 0
                 rt_hours = rt_minutes = rt_seconds = 0
 
+            log_level = self.log.level
+            # lk: Disable up to INFO logging level for the segment below
+            self.log.setLevel(logging.ERROR)
             self.log.info(f'= Progress: {perc:.02f}% ({processed_chunks}/{num_chunk_tasks}), '
                           f'Running for {rt_hours:02d}:{rt_minutes:02d}:{rt_seconds:02d}, '
                           f'ETA: {hours:02d}:{minutes:02d}:{seconds:02d}')
@@ -731,12 +734,23 @@ class DLManager(Process):
                           f'/ {dl_unc_speed / 1024 / 1024:.02f} MiB/s (decompressed)')
             self.log.info(f' + Disk\t- {w_speed / 1024 / 1024:.02f} MiB/s (write) / '
                           f'{r_speed / 1024 / 1024:.02f} MiB/s (read)')
+            # lk: Restore previous logging level
+            self.log.setLevel(log_level)
 
             # send status update to back to instantiator (if queue exists)
             if self.status_queue:
                 try:
                     self.status_queue.put(UIUpdate(
                         progress=perc, download_speed=dl_unc_speed, write_speed=w_speed, read_speed=r_speed,
+                        runtime=round(runtime),
+                        estimated_time_left=round(estimate),
+                        processed_chunks=processed_chunks,
+                        chunk_tasks=num_chunk_tasks,
+                        total_downloaded=total_dl,
+                        total_written=total_write,
+                        cache_usage=total_used,
+                        active_tasks=self.active_tasks,
+                        download_compressed_speed=dl_speed,
                         memory_usage=total_used * 1024 * 1024
                     ), timeout=1.0)
                 except Exception as e:
