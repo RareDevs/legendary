@@ -376,7 +376,7 @@ class LGDLFS:
                                  f'user-modified config will be renamed to "{new_filename}"...')
                 os.rename(self.config_path, os.path.join(os.path.dirname(self.config_path), new_filename))
 
-        with open(self.config_path, 'w') as cf:
+        with open(self.config_path, 'w', encoding='utf-8') as cf:
             self.config.write(cf)
 
     def get_dir_size(self):
