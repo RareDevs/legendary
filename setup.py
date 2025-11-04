@@ -38,6 +38,7 @@ setup(
         'requests<3.0',
         'requests_futures',
         'epic-expreval==0.2',
+        'InquirerPy',
         'setuptools',
         'wheel',
         'filelock'
