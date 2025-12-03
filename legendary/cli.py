@@ -31,7 +31,7 @@ from legendary.utils.custom_parser import HiddenAliasSubparsersAction
 from legendary.utils.env import is_windows_mac_or_pyi
 from legendary.lfs.eos import add_registry_entries, query_registry_entries, remove_registry_entries
 from legendary.lfs.utils import validate_files, clean_filename
-from legendary.utils.selective_dl import get_sdl_data, LGDEvaluationContext, EXTRA_FUNCTIONS
+from legendary.utils.selective_dl import get_sdl_data, LGDEvaluationContext, parse_components_selection, EXTRA_FUNCTIONS
 from legendary.lfs.wine_helpers import read_registry, get_shell_folders, case_insensitive_file_search
 
 # todo custom formatter for cli logger (clean info, highlighted error/warning)
@@ -963,36 +963,7 @@ class LegendaryCLI:
             
         install_tags = set()
         if sdl_data:
-            for element in sdl_data['Data']:
-                if element.get('IsRequired', 'false').lower() == 'true':
-                    install_tags.update(element.get('Tags', []))
-                    if element['UniqueId'] not in install_components:
-                        install_components.append(element['UniqueId'])
-                    continue
-                if element.get('Invisible', 'false').lower() == 'true':
-                    tk = Tokenizer(element['InvisibleSelectedExpression'], context)
-                    tk.extend_functions(EXTRA_FUNCTIONS)
-                    tk.compile()
-                    if tk.execute(''):
-                        logger.info('Selecting invisible component')
-                        install_tags.update(element.get('Tags', []))
-                        if element['UniqueId'] not in install_components:
-                            install_components.append(element['UniqueId'])
-
-                # The ids may change from revision to revision, this property lets us match options against older options
-                upgrade_id = element.get('UpgradePathLogic')
-                if upgrade_id and upgrade_id in install_components:
-                    install_tags.update(element.get('Tags', []))
-                    # Replace component id with upgraded one
-                    install_components = [element['UniqueId'] if el == upgrade_id else el for el in install_components]
-
-                if element['UniqueId'] in install_components:
-                    install_tags.update(element.get('Tags', []))
-
-                if element.get('ConfigHandler'):
-                    for child in element.get('Children', []):
-                        if child['UniqueId'] in install_components:
-                            install_tags.update(child.get('Tags', []))
+            parse_components_selection(sdl_data, context, install_components, install_tags)
 
         if install_components:
             self.core.lgd.config.set(game.app_name, 'install_components', ','.join(install_components))
@@ -1918,19 +1889,41 @@ class LegendaryCLI:
             else:
                 manifest_info.append(InfoItem('Uninstaller', 'uninstaller', None, None))
 
-            install_tags = {''}
-            for fm in manifest.file_manifest_list.elements:
-                for tag in fm.install_tags:
-                    install_tags.add(tag)
-
             if sdl_data:
+                context = LGDEvaluationContext(self.core)
                 install_tags_human = []
+                install_tags_data = []
                 for element in sdl_data['Data']:
                     if not element.get('Title'):
                         continue
+
                     is_required = element.get('IsRequired','false')=='true'
+                    is_default_selected = element.get('IsDefaultSelected','false')=='true'
+                    if is_default_selected and element.get('DefaultSelectedExpression'):
+                        tk = Tokenizer(element['DefaultSelectedExpression'], context)
+                        tk.extend_functions(EXTRA_FUNCTIONS)
+                        tk.compile()
+                        is_default_selected = tk.execute('')
+                    # This mapping abstracts expressions away from info command
+                    # marking default for options that apply to given user
+                    mapped_element = {
+                        'UniqueId': element.get('UniqueId'),
+                        'IsRequired': is_required,
+                        'IsDefaultSelected': is_default_selected
+                    }
+                    install_tags_data.append(mapped_element)
+
+                    for key in element.keys():
+                        if key.endswith('_translate'):
+                            mapped_element[key] = element[key] == 'true'
+                        elif key.startswith('Title') or key.startswith('Description'):
+                            mapped_element[key] = element[key]
+
                     required_txt = ' (required)' if is_required else ''
                     if element.get('Children'):
+                        mapped_element['ConfigHandler'] = element['ConfigHandler']
+                        mapped_element['Children'] = element['Children']
+
                         install_tags_human.append(f'{element["Title"]}{required_txt}')
                         for child in element.get('Children', []):
                             install_tags_human.append(f'\t{child["UniqueId"]} - {child["Title"]}')
@@ -1938,8 +1931,9 @@ class LegendaryCLI:
                         install_tags_human.append(f'{element["UniqueId"]} - {element["Title"]}{required_txt}')
             else:
                 install_tags_human = '(none)'
+                install_tags_data = None
             
-            manifest_info.append(InfoItem('Install components', 'install_components', install_tags_human, sdl_data.get('Data')))
+            manifest_info.append(InfoItem('Install components', 'install_components', install_tags_human, install_tags_data))
             # file and chunk count
             manifest_info.append(InfoItem('Files', 'num_files', manifest.file_manifest_list.count,
                                           manifest.file_manifest_list.count))
@@ -1954,44 +1948,6 @@ class LegendaryCLI:
             chunk_size = '{:.02f} GiB'.format(total_size / 1024 / 1024 / 1024)
             manifest_info.append(InfoItem('Download size (compressed)', 'download_size',
                                           chunk_size, total_size))
-
-            # if there are install tags break down size by tag
-            """
-            tag_disk_size = []
-            tag_disk_size_human = []
-            tag_download_size = []
-            tag_download_size_human = []
-            if len(install_tags) > 1:
-                longest_tag = max(max(len(t) for t in install_tags), len('(empty)'))
-                for tag in install_tags:
-                    # sum up all file sizes for the tag
-                    human_tag = tag or '(empty)'
-                    tag_files = [fm for fm in manifest.file_manifest_list.elements if
-                                 (tag in fm.install_tags) or (not tag and not fm.install_tags)]
-                    tag_file_size = sum(fm.file_size for fm in tag_files)
-                    tag_disk_size.append(dict(tag=tag, size=tag_file_size, count=len(tag_files)))
-                    tag_file_size_human = '{:.02f} GiB'.format(tag_file_size / 1024 / 1024 / 1024)
-                    tag_disk_size_human.append(f'{human_tag.ljust(longest_tag)} - {tag_file_size_human} '
-                                               f'(Files: {len(tag_files)})')
-                    # tag_disk_size_human.append(f'Size: {tag_file_size_human}, Files: {len(tag_files)}, Tag: "{tag}"')
-                    # accumulate chunk guids used for this tag and count their size too
-                    tag_chunk_guids = set()
-                    for fm in tag_files:
-                        for cp in fm.chunk_parts:
-                            tag_chunk_guids.add(cp.guid_num)
-
-                    tag_chunk_size = sum(c.file_size for c in manifest.chunk_data_list.elements
-                                         if c.guid_num in tag_chunk_guids)
-                    tag_download_size.append(dict(tag=tag, size=tag_chunk_size, count=len(tag_chunk_guids)))
-                    tag_chunk_size_human = '{:.02f} GiB'.format(tag_chunk_size / 1024 / 1024 / 1024)
-                    tag_download_size_human.append(f'{human_tag.ljust(longest_tag)} - {tag_chunk_size_human} '
-                                                   f'(Chunks: {len(tag_chunk_guids)})')
-
-            manifest_info.append(InfoItem('Disk size by install tag', 'tag_disk_size',
-                                          tag_disk_size_human or 'N/A', tag_disk_size))
-            manifest_info.append(InfoItem('Download size by install tag', 'tag_download_size',
-                                          tag_download_size_human or 'N/A', tag_download_size))
-            """
 
         if use_signed_url is not None:
             info_items["manifest"].append(
@@ -2754,58 +2710,9 @@ class LegendaryCLI:
         igame.install_path = new_path
         self.core.install_game(igame)
         logger.info('Finished.')
-
-    def eula(self, args):
-        if not self.core.login():
-            logger.error('Login failed! Unable to check for EULAs.')
-            exit(1)
-        app_name = self._resolve_aliases(args.app_name)
-        game = self.core.get_game(app_name, update_meta=True)
-        if not game:
-            self.logger.error(f'No game found for "{app_name}"')
-            return
-        eulas = game.metadata.get('eulaIds') or ['$']
-
-        pattern = r'\w+'
-        keys = []
-        for eula in eulas:
-            keys += re.findall(pattern, eula)
-
-        not_accepted_eulas = []
-        for key in keys:
-            if args.skip_epic and key == 'egstore':
-                continue
-            self.logger.debug(f'Fetching eula status for "{key}"')
-            eula = self.core.egs.eula_get_status(key)
-            if eula:
-                not_accepted_eulas.append(eula)
-
-        accepted = False
-
-        if not args.json:
-            for eula in not_accepted_eulas:
-                title = eula.get('title')
-                url = eula.get('url')
-                print(f' * {title} - {url}')
-            print(f'EULA(s) to accept: {len(not_accepted_eulas)}')
-            if not_accepted_eulas:
-                accepted = args.yes or get_boolean_choice('Mark them as accepted?')
-        else:
-            json_out = not_accepted_eulas
-            self._print_json(json_out, args.pretty_json)
-            accepted = args.yes
-
-        if accepted:
-            for eula in not_accepted_eulas:
-                key = eula.get('key')
-                version = eula.get('version')
-                locale = eula.get('locale')
-                self.logger.debug(f'Accepting "{key}" version {version}')
-                try:
-                    self.core.egs.eula_accept(key, version, locale)
-                except Exception as e:
-                    self.logger.error(f"Failed to accept EULA {key} {e!r}")
-                    return
+    
+    def get_install_size(self, args):
+        args.app_name = self._resolve_aliases(args.app_name)
 
 
 def main():
@@ -2865,6 +2772,8 @@ def main():
 
     # hidden commands have no help text
     get_token_parser = subparsers.add_parser('get-token')
+    install_size_parser = subparsers.add_parser('install-size')
+
 
     # Positional arguments
     install_parser.add_argument('app_name', help='Name of the app', metavar='<App Name>')
@@ -2973,8 +2882,6 @@ def main():
                                 help='Reset selective downloading choices (requires repair to download new components)')
     install_parser.add_argument('--skip-sdl', dest='skip_sdl', action='store_true',
                                 help='Skip SDL prompt and continue with defaults (only required game data)')
-    install_parser.add_argument('--disable-sdl', dest='disable_sdl', action='store_true',
-                                help='Disable selective downloading for title, reset existing configuration (if any)')
     install_parser.add_argument('--preferred-cdn', dest='preferred_cdn', action='store', metavar='<hostname>',
                                 help='Set the hostname of the preferred CDN to use when available')
     install_parser.add_argument('--no-https', dest='disable_https', action='store_true',
@@ -2987,6 +2894,16 @@ def main():
                                 help='Comma-separated list of IPs to bind to for downloading')
     install_parser.add_argument('--always-use-signed-urls', dest='always_use_signed_urls', action='store_true',
                                 help='Always use signed chunk URLs, even if the Epic API indicates not to')
+
+    install_size_parser.add_argument('app_name', metavar='<App Name>')
+    install_size_parser.add_argument('--install-component', dest='install_component', action='append', metavar='<id>',
+                                type=str, help='Specify what component should be treated as selected')
+    
+    install_size_parser.add_argument('--platform', dest='platform', action='store', metavar='<Platform>', type=str,
+                                help='Platform for install (default: Windows)')
+    
+    install_size_parser.add_argument('--json', dest='json', action='store_true',
+                               help='Print information as JSON')
 
     uninstall_parser.add_argument('--keep-files', dest='keep_files', action='store_true',
                                   help='Keep files but remove game from Legendary database')
@@ -3311,6 +3228,8 @@ def main():
             cli.crossover_setup(args)
         elif args.subparser_name == 'move':
             cli.move(args)
+        elif args.subparser_name == 'install-size':
+            cli.get_install_size(args)
         elif args.subparser_name == 'eula':
             cli.eula(args)
     except KeyboardInterrupt:
