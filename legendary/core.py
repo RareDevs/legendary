@@ -1288,7 +1288,7 @@ class LegendaryCore:
     @staticmethod
     def _get_cdn_urls_for_asset(asset):
         manifest_hash = asset['hash']
-        manifest_use_signed_url: bool = m_api_r['elements'][0]['useSignedUrl']
+        manifest_use_signed_url: bool = asset['useSignedUrl']
         base_urls = []
         manifest_urls = []
         for manifest in asset['manifests']:
